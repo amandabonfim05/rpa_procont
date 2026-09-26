@@ -1,0 +1,850 @@
+import os
+import sys
+import json
+import logging
+import smtplib
+import time
+from datetime import datetime
+
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+import pandas as pd
+from playwright.sync_api import sync_playwright
+
+
+# ============================================================
+# LOCALIZAÇÃO BASE (funciona rodando .py OU .exe do PyInstaller)
+# ============================================================
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ============================================================
+# CONFIGURAÇÃO EXTERNA (config.json)
+#
+# Nenhuma credencial ou caminho fica dentro do código.
+# Na primeira execução, se o arquivo não existir, ele é criado
+# com valores em branco e o RPA para para você/cliente preencher.
+# ============================================================
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+CONFIG_PADRAO = {
+    "planilha": "Base_Procont.xlsx",
+    "email_remetente": "",
+    "email_senha": "",
+    "pasta_relatorios": "REL_PROCONT",
+    "max_tentativas": 2,
+}
+
+
+def carregar_config():
+
+    if not os.path.exists(CONFIG_PATH):
+
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(CONFIG_PADRAO, f, indent=4, ensure_ascii=False)
+
+        print(f"Arquivo de configuração criado em: {CONFIG_PATH}")
+        print("Preencha os dados nele (planilha, e-mail, senha de app) e rode novamente.")
+        sys.exit(1)
+
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    for chave, valor in CONFIG_PADRAO.items():
+        config.setdefault(chave, valor)
+
+    if not config["email_remetente"] or not config["email_senha"]:
+        print(f"Erro: preencha 'email_remetente' e 'email_senha' em {CONFIG_PATH}")
+        sys.exit(1)
+
+    return config
+
+
+CONFIG = carregar_config()
+
+PLANILHA_PATH = os.path.join(BASE_DIR, CONFIG["planilha"])
+EMAIL_REMETENTE = CONFIG["email_remetente"]
+EMAIL_SENHA = CONFIG["email_senha"]
+PASTA_RELATORIOS = os.path.join(BASE_DIR, CONFIG["pasta_relatorios"])
+MAX_TENTATIVAS = int(CONFIG["max_tentativas"])
+
+
+# ============================================================
+# LOG EM ARQUIVO (além dos prints, fica um histórico salvo)
+# ============================================================
+
+LOG_PATH = os.path.join(BASE_DIR, "rpa_log.txt")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+
+log = logging.getLogger("rpa_procont")
+
+
+# ============================================================
+# ENVIO DE E-MAIL
+# ============================================================
+
+def enviar_email_pendencia(
+    email_destinatario,
+    documento,
+    razao_social,
+    caminho_pdf
+):
+
+    msg = MIMEMultipart()
+
+    msg["From"] = EMAIL_REMETENTE
+    msg["To"] = email_destinatario
+
+    msg["Subject"] = (
+        f"Relatório de Pendências - {documento}"
+    )
+
+    corpo_email = f"""Olá,
+
+Identificamos pendências no e-CAC relacionadas à empresa:
+
+Razão Social: {razao_social}
+CPF/CNPJ: {documento}
+
+O relatório de pendências foi processado pelo nosso sistema automatizado e está anexado a este e-mail.
+
+Atenciosamente,
+Robô de Automação Procont - Hamilton Jr
+"""
+
+    msg.attach(
+        MIMEText(
+            corpo_email,
+            "plain",
+            "utf-8"
+        )
+    )
+
+    if not os.path.exists(caminho_pdf):
+
+        print(
+            f"Erro: PDF não encontrado em: "
+            f"{caminho_pdf}"
+        )
+
+        return False
+
+    try:
+
+        with open(
+            caminho_pdf,
+            "rb"
+        ) as arquivo:
+
+            anexo = MIMEBase(
+                "application",
+                "pdf"
+            )
+
+            anexo.set_payload(
+                arquivo.read()
+            )
+
+        encoders.encode_base64(
+            anexo
+        )
+
+        anexo.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=f"Relatorio_{documento}.pdf"
+        )
+
+        msg.attach(
+            anexo
+        )
+
+        print(
+            f"PDF anexado: "
+            f"Relatorio_{documento}.pdf"
+        )
+
+    except Exception as e:
+
+        print(
+            f"Erro ao anexar PDF: {e}"
+        )
+
+        return False
+
+    try:
+
+        with smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465
+        ) as server:
+
+            server.login(
+                EMAIL_REMETENTE,
+                EMAIL_SENHA
+            )
+
+            server.sendmail(
+                EMAIL_REMETENTE,
+                email_destinatario,
+                msg.as_string()
+            )
+
+        print(
+            f"E-mail enviado para: "
+            f"{email_destinatario}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"Erro ao enviar e-mail para "
+            f"{email_destinatario}: {e}"
+        )
+
+        return False
+
+
+# ============================================================
+# ENVIO FINAL DOS RELATÓRIOS PARA O REMETENTE
+# ============================================================
+
+def enviar_todos_relatorios():
+
+    print("\n==========================================")
+    print("PREPARANDO E-MAIL FINAL")
+    print("==========================================")
+
+    if not os.path.exists(PASTA_RELATORIOS):
+
+        print(
+            f"Erro: pasta '{PASTA_RELATORIOS}' "
+            f"não encontrada."
+        )
+
+        print("E-mail final não será enviado.")
+
+        return
+
+    relatorios = []
+
+    for raiz, diretorios, arquivos in os.walk(
+        PASTA_RELATORIOS
+    ):
+
+        for nome_arquivo in arquivos:
+
+            if nome_arquivo.lower().endswith(".pdf"):
+
+                caminho_pdf = os.path.join(
+                    raiz,
+                    nome_arquivo
+                )
+
+                if os.path.isfile(caminho_pdf):
+                    relatorios.append(caminho_pdf)
+
+    relatorios.sort()
+
+    if not relatorios:
+
+        print(
+            "\nNenhum arquivo PDF encontrado "
+            f"dentro de '{PASTA_RELATORIOS}'."
+        )
+
+        print("E-mail final não será enviado.")
+
+        return
+
+    print(
+        f"\nTotal de PDFs encontrados: "
+        f"{len(relatorios)}"
+    )
+
+    print("\nPDFs que serão enviados:")
+
+    for caminho_pdf in relatorios:
+        print(f" - {caminho_pdf}")
+
+    msg = MIMEMultipart()
+
+    msg["From"] = EMAIL_REMETENTE
+    msg["To"] = EMAIL_REMETENTE
+
+    msg["Subject"] = (
+        "Relatórios de Pendências - "
+        "Execução do RPA Procont"
+    )
+
+    corpo_email = f"""Olá,
+
+A execução do RPA Procont foi finalizada.
+
+Foram encontrados {len(relatorios)} relatório(s) PDF
+dentro da pasta REL_PROCONT e suas subpastas.
+
+Todos os relatórios encontrados foram anexados
+a este e-mail.
+
+Atenciosamente,
+Robô de Automação Procont - Hamilton Jr
+"""
+
+    msg.attach(
+        MIMEText(
+            corpo_email,
+            "plain",
+            "utf-8"
+        )
+    )
+
+    anexados = 0
+
+    for caminho_pdf in relatorios:
+
+        try:
+
+            nome_arquivo = os.path.basename(
+                caminho_pdf
+            )
+
+            print(
+                f"\nAnexando: {nome_arquivo}"
+            )
+
+            with open(
+                caminho_pdf,
+                "rb"
+            ) as arquivo:
+
+                anexo = MIMEBase(
+                    "application",
+                    "pdf"
+                )
+
+                anexo.set_payload(
+                    arquivo.read()
+                )
+
+            encoders.encode_base64(
+                anexo
+            )
+
+            anexo.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=nome_arquivo
+            )
+
+            msg.attach(
+                anexo
+            )
+
+            anexados += 1
+
+        except Exception as e:
+
+            print(
+                f"Erro ao anexar "
+                f"{caminho_pdf}: {e}"
+            )
+
+    if anexados == 0:
+
+        print(
+            "\nNenhum PDF válido foi anexado."
+        )
+
+        print(
+            "E-mail final não será enviado."
+        )
+
+        return
+
+    try:
+
+        with smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465
+        ) as server:
+
+            server.login(
+                EMAIL_REMETENTE,
+                EMAIL_SENHA
+            )
+
+            server.sendmail(
+                EMAIL_REMETENTE,
+                EMAIL_REMETENTE,
+                msg.as_string()
+            )
+
+        print(
+            "\n=========================================="
+        )
+
+        print(
+            "E-MAIL FINAL ENVIADO COM SUCESSO!"
+        )
+
+        print(
+            f"{anexados} relatório(s) "
+            f"enviado(s) para "
+            f"{EMAIL_REMETENTE}."
+        )
+
+        print(
+            "=========================================="
+        )
+
+    except Exception as e:
+
+        print(
+            f"\nErro ao enviar e-mail final: {e}"
+        )
+
+
+# ============================================================
+# RECUPERAÇÃO DE ESTADO APÓS ERRO
+#
+# Depois de uma falha, tenta deixar a página em um estado
+# neutro (fecha dropdown/modal aberto) antes de tentar de novo
+# ou seguir para o próximo CNPJ. Evita que um erro derrube
+# todos os CNPJs seguintes em cascata.
+# ============================================================
+
+def recuperar_estado(page):
+
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+    try:
+        page.mouse.click(5, 5)
+    except Exception:
+        pass
+
+    time.sleep(2)
+
+
+# ============================================================
+# PROCESSAMENTO DE UM ÚNICO CPF/CNPJ
+#
+# Lança exceção em caso de falha (é capturada por quem chama).
+# Retorna (pendencia_encontrada, caminho_pdf_ou_None).
+# ============================================================
+
+def processar_documento(page, documento_atual, email_atual, razao_social):
+
+    print("Acessando o menu de troca de perfil...")
+
+    avatar_dropdown = page.locator("#avatar-dropdown-trigger")
+    avatar_dropdown.wait_for(state="visible", timeout=60000)
+    avatar_dropdown.click()
+
+    time.sleep(2)
+
+    print("Localizando campo CPF/CNPJ...")
+
+    campo_cpf_cnpj = page.locator("#input-representar-cpfcnpj")
+    campo_cpf_cnpj.wait_for(state="visible", timeout=30000)
+
+    print(f"Preenchendo CPF/CNPJ: {documento_atual}")
+
+    campo_cpf_cnpj.click()
+    campo_cpf_cnpj.fill("")
+    campo_cpf_cnpj.fill(documento_atual)
+
+    print("CPF/CNPJ preenchido.")
+
+    time.sleep(2)
+
+    print("Localizando dropdown de perfil...")
+
+    dropdown_perfil = page.locator("br-select[name='perfil-select']")
+    dropdown_perfil.wait_for(state="visible", timeout=30000)
+
+    container_dropdown = dropdown_perfil.locator(".ng-select-container")
+    container_dropdown.wait_for(state="visible", timeout=30000)
+
+    print("Abrindo dropdown...")
+
+    container_dropdown.click()
+
+    time.sleep(2)
+
+    print("Procurando opção 'Procurador'...")
+
+    opcao_procurador = page.locator(
+        ".ng-option[role='option']"
+    ).filter(has_text="Procurador").first
+
+    opcao_procurador.wait_for(state="visible", timeout=30000)
+    opcao_procurador.click()
+
+    print("Procurador selecionado.")
+
+    time.sleep(2)
+
+    print("Procurando botão 'Representar'...")
+
+    botao_representar = page.locator(
+        "button[type='submit'].br-button.primary.block"
+    ).filter(has_text="Representar").first
+
+    botao_representar.wait_for(state="visible", timeout=30000)
+
+    print("Clicando em 'Representar'...")
+
+    botao_representar.click()
+
+    print("Botão 'Representar' clicado.")
+
+    print("Aguardando troca de perfil...")
+
+    time.sleep(5)
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+
+    time.sleep(3)
+
+    print(f"Representação realizada para {documento_atual}.")
+
+    print("Verificando situação fiscal...")
+
+    campo_com_pendencia = page.get_by_text("Com pendência", exact=True)
+
+    try:
+        campo_com_pendencia.wait_for(state="visible", timeout=15000)
+        print(f"⚠️ COM PENDÊNCIA encontrada para {documento_atual}.")
+        pendencia_encontrada = True
+    except Exception:
+        print(f"✅ Nenhuma 'Com pendência' encontrada para {documento_atual}.")
+        pendencia_encontrada = False
+
+    if not pendencia_encontrada:
+        print(f"Documento {documento_atual} SEM PENDÊNCIA.")
+        print("Relatório não será baixado.")
+        print("Nenhum e-mail será enviado.")
+        return False, None
+
+    print("Procurando botão 'Baixar Relatório'...")
+
+    botao_download = page.locator(
+        "button[type='button'].br-button.secondary.btn-acao"
+    ).filter(has_text="Baixar Relatório").first
+
+    botao_download.wait_for(state="visible", timeout=30000)
+
+    print("Botão 'Baixar Relatório' encontrado.")
+
+    print(f"Iniciando download para {documento_atual}...")
+
+    with page.expect_download(timeout=60000) as download_info:
+        botao_download.click()
+
+    download = download_info.value
+
+    caminho_salvar = os.path.join(
+        PASTA_RELATORIOS,
+        f"Relatorio_{documento_atual}.pdf"
+    )
+
+    download.save_as(caminho_salvar)
+
+    print(f"Relatório salvo em: {caminho_salvar}")
+
+    if email_atual:
+
+        emails = [
+            email.strip()
+            for email in email_atual.split(";")
+            if email.strip()
+        ]
+
+        for email_destinatario in emails:
+
+            print(f"Enviando relatório para {email_destinatario}...")
+
+            enviar_email_pendencia(
+                email_destinatario,
+                documento_atual,
+                razao_social,
+                caminho_salvar
+            )
+
+    else:
+        print("Nenhum e-mail informado para este documento.")
+
+    return True, caminho_salvar
+
+
+# ============================================================
+# RELATÓRIO FINAL DE EXECUÇÃO (Excel com status de cada CNPJ)
+# ============================================================
+
+def salvar_relatorio_execucao(resultados):
+
+    if not resultados:
+        print("\nNenhum CNPJ foi processado, relatório de execução não gerado.")
+        return
+
+    df_resultado = pd.DataFrame(resultados)
+
+    nome_arquivo = f"relatorio_execucao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    caminho_relatorio = os.path.join(BASE_DIR, nome_arquivo)
+
+    df_resultado.to_excel(caminho_relatorio, index=False)
+
+    total = len(resultados)
+    erros = [r for r in resultados if r["Status"] == "ERRO"]
+
+    print("\n══════════════════════════════════════════")
+    print("RESUMO DA EXECUÇÃO")
+    print("══════════════════════════════════════════")
+    print(f"Total processado: {total}")
+    print(f"OK: {total - len(erros)}")
+    print(f"Com erro: {len(erros)}")
+    print(f"Relatório salvo em: {caminho_relatorio}")
+
+    log.info(f"Execução finalizada. Total={total} OK={total - len(erros)} Erros={len(erros)}")
+
+    if erros:
+        print("\nCNPJs/CPFs com erro:")
+        for r in erros:
+            print(f" - {r['CPF_CNPJ']} ({r['Razao_Social']}): {r['Erro']}")
+            log.error(f"CNPJ com erro: {r['CPF_CNPJ']} - {r['Erro']}")
+
+    print("══════════════════════════════════════════")
+
+
+# ============================================================
+# EXECUÇÃO DO RPA
+# ============================================================
+
+def executar_rpa():
+
+    resultados = []
+    relatorios_baixados = []
+
+    if not os.path.exists(PLANILHA_PATH):
+        print(f"Erro: o arquivo '{PLANILHA_PATH}' não foi encontrado.")
+        log.critical(f"Planilha não encontrada: {PLANILHA_PATH}")
+        return
+
+    df = pd.read_excel(PLANILHA_PATH, dtype=str)
+    df.columns = df.columns.astype(str).str.strip()
+
+    print("Colunas encontradas:")
+    print(df.columns.tolist())
+
+    colunas_obrigatorias = ["CPF/CNPJ", "EMAIL", "RAZÃO"]
+
+    for coluna in colunas_obrigatorias:
+        if coluna not in df.columns:
+            print(f"Erro: a coluna '{coluna}' não foi encontrada.")
+            log.critical(f"Coluna obrigatória ausente: {coluna}")
+            return
+
+    if not os.path.exists(PASTA_RELATORIOS):
+        os.makedirs(PASTA_RELATORIOS)
+
+    try:
+
+        print("Conectando ao Google Chrome...")
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.connect_over_cdp("http://localhost:9222")
+
+            if not browser.contexts:
+                print("Erro: nenhuma sessão do Chrome foi encontrada.")
+                log.critical("Nenhuma sessão de Chrome encontrada na porta 9222.")
+                return
+
+            context = browser.contexts[0]
+
+            if context.pages:
+                page = context.pages[0]
+            else:
+                page = context.new_page()
+
+            print("Conectado à sessão ativa do Chrome!")
+
+            print("Clicando em Certidões e Situação Fiscal...")
+
+            botao_certidoes = page.locator("#btn271")
+            botao_certidoes.wait_for(state="visible", timeout=60000)
+            botao_certidoes.click()
+
+            time.sleep(3)
+
+            print("Clicando em Consulta Pendências - Situação Fiscal...")
+
+            link_pendencias = page.get_by_role(
+                "link", name="Consulta Pendências - Situação Fiscal"
+            ).first
+
+            link_pendencias.wait_for(state="visible", timeout=30000)
+
+            with context.expect_page(timeout=30000) as nova_aba_info:
+                link_pendencias.click()
+
+            page = nova_aba_info.value
+            page.wait_for_load_state("domcontentloaded", timeout=60000)
+
+            print("Nova página de Pendências carregada com sucesso!")
+
+            time.sleep(3)
+
+            print("Procurando botão 'Entrar com GovBR'...")
+
+            botao_gov = page.locator("input[type='submit'][value='Entrar com GovBR']")
+            botao_gov.wait_for(state="visible", timeout=60000)
+
+            print("Clicando em 'Entrar com GovBR'...")
+
+            botao_gov.click()
+
+            print("Botão 'Entrar com GovBR' clicado.")
+
+            time.sleep(5)
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+
+            time.sleep(5)
+
+            print("Página carregada.")
+
+            # --------------------------------------------------
+            # LOOP DA PLANILHA — cada CNPJ é isolado: um erro não
+            # interrompe os demais.
+            # --------------------------------------------------
+
+            for index, linha in df.iterrows():
+
+                documento_atual = str(linha["CPF/CNPJ"]).strip()
+                email_atual = str(linha["EMAIL"]).strip()
+                razao_social = str(linha["RAZÃO"]).strip()
+
+                if not documento_atual or documento_atual.lower() == "nan":
+                    print(f"Documento vazio na linha {index + 2}. Pulando...")
+                    continue
+
+                if email_atual.lower() == "nan":
+                    email_atual = ""
+
+                if razao_social.lower() == "nan":
+                    razao_social = ""
+
+                print("\n──────────────────────────────────────────")
+                print(f"Processando [{index + 1}/{len(df)}]")
+                print(f"Razão Social: {razao_social}")
+                print(f"CPF/CNPJ: {documento_atual}")
+                print(f"E-mail: {email_atual}")
+
+                log.info(f"Iniciando processamento: {documento_atual} ({razao_social})")
+
+                sucesso = False
+                ultimo_erro = ""
+                pendencia_encontrada = False
+                caminho_pdf = None
+
+                for tentativa in range(1, MAX_TENTATIVAS + 1):
+
+                    try:
+                        pendencia_encontrada, caminho_pdf = processar_documento(
+                            page, documento_atual, email_atual, razao_social
+                        )
+                        sucesso = True
+                        break
+
+                    except Exception as e:
+                        ultimo_erro = f"{type(e).__name__}: {e}"
+                        log.error(
+                            f"Falha ao processar {documento_atual} "
+                            f"(tentativa {tentativa}/{MAX_TENTATIVAS}): {ultimo_erro}"
+                        )
+                        print(f"❌ Erro ao processar {documento_atual}: {ultimo_erro}")
+
+                        if tentativa < MAX_TENTATIVAS:
+                            print("Tentando recuperar a página para nova tentativa...")
+
+                        recuperar_estado(page)
+
+                if sucesso:
+
+                    if pendencia_encontrada and caminho_pdf:
+                        relatorios_baixados.append(caminho_pdf)
+
+                    resultados.append({
+                        "Linha": index + 2,
+                        "Razao_Social": razao_social,
+                        "CPF_CNPJ": documento_atual,
+                        "Status": "OK",
+                        "Pendencia": "Sim" if pendencia_encontrada else "Não",
+                        "Erro": "",
+                    })
+
+                else:
+
+                    resultados.append({
+                        "Linha": index + 2,
+                        "Razao_Social": razao_social,
+                        "CPF_CNPJ": documento_atual,
+                        "Status": "ERRO",
+                        "Pendencia": "",
+                        "Erro": ultimo_erro,
+                    })
+
+            print("\n══════════════════════════════════════════")
+            print("Processamento da planilha finalizado.")
+            print(f"Total de relatórios baixados: {len(relatorios_baixados)}")
+            print("══════════════════════════════════════════")
+
+    except Exception as e:
+
+        log.critical(f"Erro fatal na execução do RPA: {e}")
+        print(f"\n🚨 Erro fatal: {e}")
+        print("O RPA será encerrado, mas o relatório parcial será salvo abaixo.")
+
+    finally:
+
+        salvar_relatorio_execucao(resultados)
+
+        if relatorios_baixados:
+            enviar_todos_relatorios()
+
+
+# ============================================================
+# INICIAR RPA
+# ============================================================
+
+if __name__ == "__main__":
+    executar_rpa()
