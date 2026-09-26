@@ -1,0 +1,32 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar as bibliotecas necessarias
+        run: |
+          pip install pandas openpyxl playwright pyinstaller
+
+      - name: Gerar o executavel (.exe)
+        run: |
+          python -m PyInstaller --onefile --collect-all playwright --name consultaRelPend consultaRelPend.py
+
+      - name: Disponibilizar o executavel para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: consultaRelPend-exe
+          path: dist/consultaRelPend.exe
