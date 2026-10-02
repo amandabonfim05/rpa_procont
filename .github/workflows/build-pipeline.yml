@@ -1,0 +1,40 @@
+name: Build Pipeline EXEs
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar as bibliotecas necessarias
+        run: |
+          pip install pandas openpyxl playwright pyinstaller selenium requests
+
+      - name: Gerar rpap2.exe (Fluxo 1 - e-CAC)
+        run: python -m PyInstaller --onefile --collect-all playwright --name rpap2 rpap2.py
+
+      - name: Gerar rpa2dif.exe (Fluxo 4 - PGFN Regularize)
+        run: python -m PyInstaller --onefile --collect-all playwright --name rpa2dif rpa2dif.py
+
+      - name: Gerar rpa2envioemail.exe
+        run: python -m PyInstaller --onefile --name rpa2envioemail rpa2envioemail.py
+
+      - name: Gerar rpa2taskdo.exe
+        run: python -m PyInstaller --onefile --name rpa2taskdo rpa2taskdo.py
+
+      - name: Disponibilizar os executaveis para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-rpa-exes
+          path: dist/*.exe
