@@ -131,10 +131,6 @@ Esses workflows instalam as dependências e geram artefatos prontos para downloa
 - O projeto foi pensado para execução local e para geração de executáveis Windows em ambiente corporativo.
 - A segurança é tratada separando credenciais em `config.json`, em vez de deixá-las hardcoded no código.
 
-## Licença
-
-Este repositório não informa uma licença explícita no arquivo principal cadastrado. Verifique com o responsável do projeto antes de redistribuir ou reutilizar o código em produção.
-
 ## Autor
 
 Projeto mantido por Amanda Bonfim.
