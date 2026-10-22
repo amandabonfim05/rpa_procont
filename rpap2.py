@@ -438,9 +438,9 @@ async def resolver_e_continuar_captcha(page):
         print("Aviso: Checkbox do captcha não encontrado nos frames ativos.")
 
     print("Aguardando validação do hCaptcha...")
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(5000)
 
-    print("Procurando o botão 'Continuar' do Captcha...")
+    print("Procurando o botão 'Continuar' do Captcha após pausa maior...")
 
     seletor_continuar = (
         'input[value="Continuar"], '
@@ -457,7 +457,8 @@ async def resolver_e_continuar_captcha(page):
             btn = ctx.locator(seletor_continuar).first
 
             if await btn.count() > 0 and await btn.is_visible():
-                print("Botão 'Continuar' do Captcha localizado! Executando clique...")
+                print("Botão 'Continuar' do Captcha localizado! Aguardando 5s antes do clique...")
+                await page.wait_for_timeout(5000)
                 try:
                     await btn.click(timeout=3000)
                     clique_sucesso = True
